@@ -14,7 +14,7 @@ struct FmTwo {
     midi_note_id:u8,
     midi_note_freq:f32,
     envelope: f32,
-    envelope_index:bool,
+    envelope_index:u8,
 
 
 }
@@ -35,6 +35,10 @@ struct FmTwoParams {
     pub attack: FloatParam,
     #[id = "decay"]
     pub decay: FloatParam,
+    #[id = "sustain"]
+    pub sustain: FloatParam,
+    #[id = "release"]
+    pub release: FloatParam,
 }
 
 impl Default for FmTwo {
@@ -47,7 +51,7 @@ impl Default for FmTwo {
             midi_note_id: 0,
             midi_note_freq: 1.0,
             envelope:0.0,
-            envelope_index:false,
+            envelope_index:4,
         }
     }
 }
@@ -96,7 +100,7 @@ impl Default for FmTwoParams {
                 0.3,
                 FloatRange::Linear{
                     min: 0.0,
-                    max: 8.0,
+                    max: 12.0,
                 
                 },
             )
@@ -105,8 +109,8 @@ impl Default for FmTwoParams {
                 "attack",
                 0.3,
                 FloatRange::Linear{
-                    min: 0.005,
-                    max: 0.5,
+                    min: 0.0,
+                    max: 1.0,
                 
                 },
             )
@@ -116,11 +120,31 @@ impl Default for FmTwoParams {
                 0.3,
                 FloatRange::Linear{
                     min: 0.0,
-                    max: 0.5,
+                    max: 1.0,
                 
                 },
             )
-            .with_smoother(SmoothingStyle::Linear(10.0))
+            .with_smoother(SmoothingStyle::Linear(10.0)),
+            sustain: FloatParam::new(
+                "sustain",
+                0.5,
+                FloatRange::Linear{
+                    min: 0.0,
+                    max: 1.0,
+                
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(10.0)),
+            release: FloatParam::new(
+                "release",
+                0.5,
+                FloatRange::Linear{
+                    min: 0.0,
+                    max: 1.0,
+                
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(10.0)),
         }
     }
 }
@@ -148,16 +172,23 @@ impl FmTwo {
 
         frequency
     }
-    fn calculate_envelope(&mut self, attack:f32,decay:f32) {
+    fn calculate_envelope(&mut self, attack:f32,decay:f32,sustain:f32,release:f32) {
         let attack_delta = 1.0/(attack*self.sample_rate);
         let decay_delta = 1.0/(decay*self.sample_rate);
+        let release_delta = 1.0/(release*self.sample_rate);
 
-        if self.envelope < 1.0 && self.envelope_index == false {
-            self.envelope += attack_delta
+        if self.envelope_index == 0 {
+            self.envelope += attack_delta;
+            if self.envelope >= 1.0 {self.envelope_index += 1}
         }
-        if self.envelope >= 1.0 {self.envelope_index = true}
-        if self.envelope_index ==true && self.envelope > 0.0 {
-            self.envelope -= decay_delta
+        if self.envelope_index == 1 {
+            self.envelope -= decay_delta;
+            if self.envelope <= sustain {self.envelope_index += 1; self.envelope = sustain}
+        }
+        if self.envelope_index == 2 {self.envelope = sustain}
+        if self.envelope_index == 3 {
+            self.envelope -= release_delta;
+            if self.envelope <= 0.0 {self.envelope = 0.0;self.envelope_index += 1}
         }
 
 
@@ -212,6 +243,7 @@ impl Plugin for FmTwo {
         self.op1_phase = 0.0;
         self.op2_phase = 0.0;
         self.midi_note_freq = 1.0;
+        self.envelope_index = 3;
     }
 
     fn process(
@@ -225,6 +257,8 @@ impl Plugin for FmTwo {
             let gain = self.params.gain.smoothed.next();
             let attack = self.params.attack.smoothed.next();
             let decay = self.params.decay.smoothed.next();
+            let sustain = self.params.sustain.smoothed.next();
+            let release = self.params.release.smoothed.next();
             while let Some(event) = next_event {
                 if event.timing() > sample_id as u32 {
                     break;
@@ -234,12 +268,11 @@ impl Plugin for FmTwo {
                     NoteEvent::NoteOn { note, velocity, .. } => {
                         self.midi_note_id = note;
                         self.midi_note_freq = util::midi_note_to_freq(note);
-                        self.calculate_envelope(attack, decay)
+                        self.envelope_index = 0
                         
                     }
                     NoteEvent::NoteOff { note, .. } if note == self.midi_note_id => {
-                        self.envelope = 0.0;
-                        self.envelope_index = false;   
+                        self.envelope_index = 3;   
                     }
                     
                     _ => (),
@@ -247,6 +280,7 @@ impl Plugin for FmTwo {
 
                 next_event = context.next_event();
             }
+            self.calculate_envelope(attack, decay, sustain, release);
             let freq = self.calculate_frequency(self.midi_note_freq, self.params.frequency.smoothed.next(),self.params.depth.smoothed.next());
             let sine = self.calculate_sine(freq);
             for sample in channel_samples {
