@@ -1,19 +1,14 @@
+use fm_voice::fm;
 use nih_plug::prelude::*;
 use std::sync::Arc;
-use std::f32::consts;
+
+mod fm_voice;
 
 
 struct FmTwo {
     params: Arc<FmTwoParams>,
-    sample_rate:f32,
-    op1_phase:f32,
-    op2_phase:f32,
-    midi_note_id:u8,
-    midi_note_freq:f32,
-    envelope: f32,
-    envelope_index:u8,
-
-
+    voice1: fm::Voice,
+    voice2: fm::Voice
 }
 
 #[derive(Params)]
@@ -38,13 +33,8 @@ impl Default for FmTwo {
     fn default() -> Self {
         Self {
             params: Arc::new(FmTwoParams::default()),
-            op1_phase:0.0,
-            op2_phase:0.0,
-            sample_rate: 1.0,
-            midi_note_id: 0,
-            midi_note_freq: 1.0,
-            envelope:0.0,
-            envelope_index:4,
+            voice1: fm::Voice::new(),
+            voice2: fm::Voice::new()
         }
     }
 }
@@ -130,52 +120,7 @@ impl Default for FmTwoParams {
     }
 }
 
-impl FmTwo {
-    fn calculate_sine(&mut self, frequency: f32) -> f32 {
-        let phase_delta = frequency / self.sample_rate;
-        let sine = (self.op1_phase * consts::TAU).sin();
 
-        self.op1_phase += phase_delta;
-        if self.op1_phase >= 1.0 {
-            self.op1_phase -= 1.0;
-        }
-
-        sine
-    }
-    fn calculate_frequency(&mut self,input_frequency:f32,frequency:f32,depth:f32) -> f32 {
-        let phase_delta = (input_frequency*frequency) / self.sample_rate;
-        let frequency = (self.op2_phase * consts::TAU).sin() * (depth * input_frequency);
-
-        self.op2_phase += phase_delta;
-        if self.op2_phase >= 1.0 {
-            self.op2_phase -= 1.0;
-        }
-
-        frequency
-    }
-    fn calculate_envelope(&mut self, attack:f32,decay:f32,sustain:f32,release:f32) {
-        let attack_delta = 1.0/(attack*self.sample_rate);
-        let decay_delta = 1.0/(decay*self.sample_rate);
-        let release_delta = 1.0/(release*self.sample_rate);
-
-        if self.envelope_index == 0 {
-            self.envelope += attack_delta;
-            if self.envelope >= 1.0 {self.envelope_index += 1}
-        }
-        if self.envelope_index == 1 {
-            self.envelope -= decay_delta;
-            if self.envelope <= sustain {self.envelope_index += 1; self.envelope = sustain}
-        }
-        if self.envelope_index == 2 {self.envelope = sustain}
-        if self.envelope_index == 3 {
-            self.envelope -= release_delta;
-            if self.envelope <= 0.0 {self.envelope = 0.0;self.envelope_index += 1}
-        }
-
-
-
-    }
-}
 
 impl Plugin for FmTwo {
     const NAME: &'static str = "Fm Two";
@@ -214,15 +159,13 @@ impl Plugin for FmTwo {
         buffer_config: &BufferConfig,
         _context: &mut impl InitContext<Self>,
     ) -> bool {
-        self.sample_rate = buffer_config.sample_rate;
+        self.voice1.sample_rate = buffer_config.sample_rate;
+        self.voice2.sample_rate = buffer_config.sample_rate;
         true
     }
 
     fn reset(&mut self) {
-        self.op1_phase = 0.0;
-        self.op2_phase = 0.0;
-        self.midi_note_freq = 1.0;
-        self.envelope_index = 3;
+        self.voice1.reset()
     }
 
     fn process(
@@ -245,13 +188,25 @@ impl Plugin for FmTwo {
 
                 match event {
                     NoteEvent::NoteOn { note, velocity, .. } => {
-                        self.midi_note_id = note;
-                        self.midi_note_freq = util::midi_note_to_freq(note);
-                        self.envelope_index = 0
+                        if self.voice1.envelope_index == 4 || self.voice1.midi_note_id == note {
+                            self.voice1.midi_note_id = note;
+                            self.voice1.midi_note_freq = util::midi_note_to_freq(note);
+                            self.voice1.envelope_index = 0;
+                        }
+                        else if self.voice2.envelope_index == 4 || self.voice2.midi_note_id == note {
+                            self.voice2.midi_note_id = note;
+                            self.voice2.midi_note_freq = util::midi_note_to_freq(note);
+                            self.voice2.envelope_index = 0;    
+                        } else {
+                            self.voice1.midi_note_id = note;
+                            self.voice1.midi_note_freq = util::midi_note_to_freq(note);
+                            self.voice1.envelope_index = 0;  
+                        }
                         
                     }
-                    NoteEvent::NoteOff { note, .. } if note == self.midi_note_id => {
-                        self.envelope_index = 3;   
+                    NoteEvent::NoteOff { note, .. } => {
+                        if self.voice1.midi_note_id == note {self.voice1.envelope_index = 3}
+                        if self.voice2.midi_note_id == note {self.voice2.envelope_index = 3};   
                     }
                     
                     _ => (),
@@ -259,11 +214,14 @@ impl Plugin for FmTwo {
 
                 next_event = context.next_event();
             }
-            self.calculate_envelope(attack, decay, sustain, release);
-            let freq = self.calculate_frequency(self.midi_note_freq, self.params.frequency.smoothed.next(),self.params.depth.smoothed.next());
-            let sine = self.calculate_sine(freq);
+            self.voice1.calculate_envelope(attack, decay, sustain, release);
+            self.voice2.calculate_envelope(attack, decay, sustain, release);
+            let freq1 = self.voice1.calculate_frequency(self.voice1.midi_note_freq, self.params.frequency.smoothed.next(),self.params.depth.smoothed.next());
+            let freq2 = self.voice1.calculate_frequency(self.voice2.midi_note_freq, self.params.frequency.smoothed.next(),self.params.depth.smoothed.next());
+            let sine1 = self.voice1.calculate_sine(freq1);
+            let sine2 = self.voice1.calculate_sine(freq2);
             for sample in channel_samples {
-                *sample = sine * gain * self.envelope
+                *sample = ((sine1 * self.voice1.envelope) + (sine2*self.voice2.envelope)) * gain
             }
 
         }
