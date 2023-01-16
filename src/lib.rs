@@ -32,6 +32,8 @@ struct FmTwoParams {
     pub sustain: FloatParam,
     #[id = "release"]
     pub release: FloatParam,
+    #[id = "envmod"]
+    pub envmod: FloatParam,
 }
 
 impl Default for FmTwo {
@@ -126,6 +128,16 @@ impl Default for FmTwoParams {
                 },
             )
             .with_smoother(SmoothingStyle::Linear(10.0)),
+            envmod: FloatParam::new(
+                "envmod",
+                0.0,
+                FloatRange::Linear{
+                    min: -5.0,
+                    max: 5.0,
+                
+                },
+            )
+            .with_smoother(SmoothingStyle::Linear(10.0)),
         }
     }
 }
@@ -152,6 +164,11 @@ impl FmTwo {
         }
 
         frequency
+    }
+    fn calculate_depth(&mut self,depth:f32,mod_amount:f32) -> f32 {
+        if mod_amount.abs() >= 0.2 {depth + (self.envelope * mod_amount)}
+        else {depth} 
+        
     }
     fn calculate_envelope(&mut self, attack:f32,decay:f32,sustain:f32,release:f32) {
         let attack_delta = 1.0/(attack*self.sample_rate);
@@ -238,6 +255,8 @@ impl Plugin for FmTwo {
             let decay = self.params.decay.smoothed.next();
             let sustain = self.params.sustain.smoothed.next();
             let release = self.params.release.smoothed.next();
+            let envmod = self.params.envmod.smoothed.next();
+            let mut depth = self.params.depth.smoothed.next();
             while let Some(event) = next_event {
                 if event.timing() > sample_id as u32 {
                     break;
@@ -260,7 +279,8 @@ impl Plugin for FmTwo {
                 next_event = context.next_event();
             }
             self.calculate_envelope(attack, decay, sustain, release);
-            let freq = self.calculate_frequency(self.midi_note_freq, self.params.frequency.smoothed.next(),self.params.depth.smoothed.next());
+            depth = self.calculate_depth(depth, envmod);
+            let freq = self.calculate_frequency(self.midi_note_freq, self.params.frequency.smoothed.next(),depth);
             let sine = self.calculate_sine(freq);
             for sample in channel_samples {
                 *sample = sine * gain * self.envelope
@@ -276,7 +296,7 @@ impl Plugin for FmTwo {
 
 impl ClapPlugin for FmTwo {
     const CLAP_ID: &'static str = "com.dogvomit.FM-two";
-    const CLAP_DESCRIPTION: Option<&'static str> = Some("simple fm synth mostly for percusive sounds");
+    const CLAP_DESCRIPTION: Option<&'static str> = Some("simple fm synth");
     const CLAP_MANUAL_URL: Option<&'static str> = Some(Self::URL);
     const CLAP_SUPPORT_URL: Option<&'static str> = None;
 
